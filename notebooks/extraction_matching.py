@@ -6,12 +6,31 @@ import threading
 from ast import literal_eval
 from pathlib import Path
 from queue import Queue
-from typing import List
+from typing import List, Optional
 import pandas as pd
 from tqdm import tqdm
 from openai import OpenAI
+import os
+from dotenv import load_dotenv
 
-__all__ = ['two_step_extraction', 'compile_extracted_results', 'match_results']
+# Load environment variables from a .env file
+load_dotenv()
+
+__all__ = [
+    'two_step_extraction',
+    'compile_extracted_results',  # This is now deprecated, use run_extraction
+    'match_results',
+    'run_extraction',
+    'process_file'
+]
+
+# =======================
+# Prompts (unchanged)
+# =======================
+
+# NOTE: The prompts below use non-standard `{{` and `}}` for dictionary examples.
+# The `_parse_json_result` function uses `ast.literal_eval` as a fallback
+# to handle this syntax, as it is not valid JSON.
 
 prompt_step1 = """
 From the following given title and abstract, extract all studied exposures and outcomes separately. Ignore any other information.
@@ -36,9 +55,7 @@ Example output:
     "outcomes": [“systolic blood pressure changes”, “diastolic blood pressure changes”, “incidence of hypertension”, “CVD mortality”, “total mortality”, “fatal and nonfatal cardiovascular disease events”]
 }
 
-Only output in JSON format, do not include any explanations or additional text in your response. no ```json ``` in your response.
-no ```json ``` in your response.
-no ```json ``` in your response.
+Only output in JSON format, do not include any explanations or additional text in your response.
 """
 
 prompt_step2_template = """
@@ -63,20 +80,17 @@ Return the extracted information in a list of flat JSON dictionaries of each res
 
 *Exposure Direction Classification
 For each exposure mentioning salt or sodium intake:
-		1.	If the intervention or action explicitly decreases sodium/salt (e.g., “salt restriction,” “salt substitute,” “low-sodium diet,” “reduce salt”), set "exposure_direction" to "decreased".
-	2.	If it explicitly increases sodium/salt, or uses standard/high salt (e.g., “high-salt diet,” “less salt education,” “usual diet with no reduction”), set "exposure_direction" to "increased".
+    1. If the intervention or action explicitly decreases sodium/salt (e.g., “salt restriction,” “salt substitute,” “low-sodium diet,” “reduce salt”), set "exposure_direction" to "decreased".
+    2. If it explicitly increases sodium/salt, or uses standard/high salt (e.g., “high-salt diet,” “less salt education,” “usual diet with no reduction”), set "exposure_direction" to "increased".
 
-	Examples of Phrases → exposure_direction:
-	•	“Participants in the intervention arm received a salt-substitution product” → decreased
-	•	“Control arm participants received the usual advice without further diet restrictions” → increased
-	•	“We advised a low-sodium diet” → decreased
-	•	“We gave participants fewer educational materials about reducing salt” → increased
+    Examples of Phrases → exposure_direction:
+    •  “Participants in the intervention arm received a salt-substitution product” → decreased
+    •  “Control arm participants received the usual advice without further diet restrictions” → increased
+    •  “We advised a low-sodium diet” → decreased
+    •  “We gave participants fewer educational materials about reducing salt” → increased
 
 Example input entities:
-{{
-    "exposures": [“24-hour urinary sodium excretion”],
-    "outcomes": [“systolic blood pressure changes”, “diastolic blood pressure changes”, “incidence of hypertension”, “CVD mortality”, “total mortality”, “fatal and nonfatal cardiovascular disease events”]
-}}
+{entities}
 
 Example input title and abstract:
 ""
@@ -161,141 +175,10 @@ Example output:
     }}
 ]
 
-Only output in JSON format, do not include any explanations or additional text in your response. no ```json ``` in your response.
-no ```json ``` in your response.
-no ```json ``` in your response.
+Only output in JSON format, do not include any explanations or additional text in your response.
 """
 
-# Define token counters
-total_input_tokens = 0
-total_output_tokens = 0
-token_lock = threading.Lock()  # Prevent race conditions in multi-threaded execution
-
-# Function to perform the two-step extraction
-def two_step_extraction(text,client,MODEL):
-    global total_input_tokens, total_output_tokens
-
-    # Step 1: Extract exposures and outcomes
-    completion_step1 = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": "You are an evidence-based medicine annotator, particularly in effect of salt or urinary sodium on cardiovascular events, help me extract structured information from free texts of article titles and abstracts"},
-            {"role": "user", "content": prompt_step1},
-            {"role": "user", "content": text}
-        ]
-    )
-
-    # Extract token usage
-    step1_tokens_in = completion_step1.usage.prompt_tokens
-    step1_tokens_out = completion_step1.usage.completion_tokens
-
-    # Update global token counters
-    with token_lock:
-        total_input_tokens += step1_tokens_in
-        total_output_tokens += step1_tokens_out
-
-    # Process step 1 output
-    entities_result = completion_step1.choices[0].message.content
-    entities_result = entities_result.strip().removeprefix("```json").removesuffix("```").strip()
-    entities_dict = json.loads(entities_result)
-    entities_json = json.dumps(entities_dict, indent=2)
-
-    # Prepare step 2 prompt
-    prompt_step2 = prompt_step2_template.format(entities=entities_json)
-
-    # Step 2: Extract associations using the entities
-    completion_step2 = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": "You are an evidence-based medicine annotator, particularly in effect of salt or urinary sodium on cardiovascular events, help me infer associations from given entities and titles and abstracts"},
-            {"role": "user", "content": prompt_step2},
-            {"role": "user", "content": f"extracted entities: {entities_json}"},
-            {"role": "user", "content": f"title and abstract: {text}"}
-        ]
-    )
-
-    # Extract token usage
-    step2_tokens_in = completion_step2.usage.prompt_tokens
-    step2_tokens_out = completion_step2.usage.completion_tokens
-
-    # Update global token counters
-    with token_lock:
-        total_input_tokens += step2_tokens_in
-        total_output_tokens += step2_tokens_out
-
-    associations_result = completion_step2.choices[0].message.content
-    #time.sleep(3)
-
-    return associations_result
-
-# Worker function to process each row
-def worker(input_queue, output_queue, text_column, progress_bar,client,MODEL):
-    while True:
-        index, row = input_queue.get()
-        if index is None:
-            break
-        try:
-            output = two_step_extraction(row[text_column],client,MODEL)
-            extracted_results = literal_eval(output)
-            for res in extracted_results:
-                res['pmid'] = row['pmid']
-                output_queue.put(res)
-        except Exception as e:
-            print(f"Error processing row {index}: {e}")
-            print(f"Input text: {row[text_column][:500]}...")  # Print the first 500 characters of the text
-            print(f"Output: {output}")  # Print the output if available
-        finally:
-            input_queue.task_done()
-            progress_bar.update(1)
-
-# Main function to compile extracted results
-def compile_extracted_results(input_df, text_column,client,MODEL):
-    global total_input_tokens, total_output_tokens  # Ensure we modify the global variables
-
-    # Reset token counters at the start of the function
-    total_input_tokens = 0
-    total_output_tokens = 0
-
-    results = []
-    input_queue = Queue()
-    output_queue = Queue()
-
-    # Progress bar for processing
-    progress_bar = tqdm(total=input_df.shape[0], desc="Processing abstracts", position=0, leave=True)
-
-    # Start worker threads
-    for _ in range(20):  # Adjust the number of threads as needed
-        threading.Thread(target=worker, args=(input_queue, output_queue, text_column, progress_bar,client,MODEL), daemon=True).start()
-
-    # Enqueue rows for processing
-    for index, row in input_df.iterrows():
-        input_queue.put((index, row))
-
-    # Wait for all tasks to be processed
-    input_queue.join()
-
-    # Collect results from output queue
-    while not output_queue.empty():
-        results.append(output_queue.get())
-
-    # Close progress bar
-    progress_bar.close()
-
-    # Print total token usage
-    print(f"Total input tokens: {total_input_tokens}")
-    print(f"Total output tokens: {total_output_tokens}")
-    print(f"Total tokens used (input + output): {total_input_tokens + total_output_tokens}")
-
-    return pd.json_normalize(results)
-    return results_df
-
-# Define the target exposure and target outcome for classification
-target_exposure = "salt/urinary sodium"
-target_outcome = "blood pressure"
-
-system_1 = "You are an expert in epidemiology, specialized in social determinants of health (SDoh), especially in effect of salt on cardiovascular events and mortality. "
-
-prompt_template_matching = f"""I extracted exposures and outcomes from abstracts of studies.
+prompt_template_matching = """I extracted exposures and outcomes from abstracts of studies.
 I will send you extracted exposure and extracted outcome in a dictionary.
 
 please help me
@@ -303,7 +186,7 @@ please help me
 1. classify if the extracted exposure concept is 'salt/urinary sodium/sodium chloride/NaCI' or synonyms (must be same or highly associated concept)
 2. classify if the extracted outcome concept is 'cardiovascular events/diseases, cvd events/diseases, any kind of mortality or death' or synonyms (must be same or highly associated concept)
 
-note CVD events are major health incidents or outcomes that stem from cardiovascular disease (CVD)—that is, disease of the heart and blood vessels. Common examples include: •	Heart attack (myocardial infarction) •	Stroke (cerebrovascular accident) •	Unstable angina •	Sudden cardiac death •	Heart failure exacerbation •	Coronary revascularization procedures (e.g., bypass surgery, angioplasty)
+note CVD events are major health incidents or outcomes that stem from cardiovascular disease (CVD)—that is, disease of the heart and blood vessels. Common examples include: •  Heart attack (myocardial infarction) • Stroke (cerebrovascular accident) •    Unstable angina •  Sudden cardiac death • Heart failure exacerbation •   Coronary revascularization procedures (e.g., bypass surgery, angioplasty)
 
 this is the input and output strucuture:
 input: {{extracted_exposure: ''; extracted_outcome: ''}}
@@ -332,74 +215,385 @@ output: {{exposure_match: 'no', outcome_match: 'yes'}}
 
 only return the output json, do not output other descriptive words"""
 
-def matching_pair(text, prompt,client,MODEL):
-    completion = client.chat.completions.create(
-        model=MODEL,
+# =======================
+# Globals / locks
+# =======================
+
+total_input_tokens = 0
+total_output_tokens = 0
+token_lock = threading.Lock()
+
+
+# =======================
+# Helpers
+# =======================
+
+def _strip_code_fences(s: str) -> str:
+    """Removes markdown code fences from a string."""
+    if not isinstance(s, str):
+        return s
+    s = s.strip()
+    if s.startswith("```"):
+        s = s.strip("`")
+        if s.lower().startswith("json"):
+            s = s[4:].lstrip("\n")
+    return s.strip()
+
+
+def _replace_smart_quotes(s: str) -> str:
+    """Replaces smart quotes with standard double quotes."""
+    if not isinstance(s, str):
+        return s
+    return (
+        s.replace("“", '"')
+        .replace("”", '"')
+        .replace("’", "'")
+        .replace("‘", "'")
+    )
+
+
+def _parse_json_result(s: str):
+    """
+    Safely parses a string into a JSON object.
+    Tries json.loads first, then falls back to literal_eval.
+    """
+    s = _strip_code_fences(s)
+    s = _replace_smart_quotes(s)
+    try:
+        return json.loads(s)
+    except Exception:
+        try:
+            return literal_eval(s)
+        except Exception as e:
+            raise ValueError(f"Could not parse model output as JSON. Original error: {e}\nOutput: {s}")
+
+
+# =======================
+# Core LLM steps
+# =======================
+
+def two_step_extraction(text: str, client: OpenAI, model: str):
+    """
+    Performs the full two-step extraction for a single text entry.
+    Returns the parsed JSON object directly.
+    """
+    global total_input_tokens, total_output_tokens
+
+    # Step 1: Extract entities
+    completion_step1 = client.chat.completions.create(
+        model=model,
         messages=[
-            {"role": "system", "content": system_1},
+            {"role": "system",
+             "content": "You are an evidence-based medicine annotator, particularly in effect of salt or urinary sodium on cardiovascular events, help me extract structured information from free texts of article titles and abstracts"},
+            {"role": "user", "content": prompt_step1},
+            {"role": "user", "content": text}
+        ]
+    )
+
+    try:
+        step1_tokens_in = completion_step1.usage.prompt_tokens
+        step1_tokens_out = completion_step1.usage.completion_tokens
+    except Exception:
+        step1_tokens_in = step1_tokens_out = 0
+
+    with token_lock:
+        total_input_tokens += step1_tokens_in
+        total_output_tokens += step1_tokens_out
+
+    entities_result = completion_step1.choices[0].message.content or ""
+    entities_dict = _parse_json_result(entities_result)
+    entities_json = json.dumps(entities_dict, indent=2)
+
+    # Step 2: Extract associations based on entities
+    prompt_step2 = prompt_step2_template.format(entities=entities_json)
+
+    completion_step2 = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system",
+             "content": "You are an evidence-based medicine annotator, particularly in effect of salt or urinary sodium on cardiovascular events, help me infer associations from given entities and titles and abstracts"},
+            {"role": "user", "content": prompt_step2},
+            {"role": "user", "content": f"extracted entities: {entities_json}"},
+            {"role": "user", "content": f"title and abstract: {text}"}
+        ]
+    )
+
+    try:
+        step2_tokens_in = completion_step2.usage.prompt_tokens
+        step2_tokens_out = completion_step2.usage.completion_tokens
+    except Exception:
+        step2_tokens_in = step2_tokens_out = 0
+
+    with token_lock:
+        total_input_tokens += step2_tokens_in
+        total_output_tokens += step2_tokens_out
+
+    associations_result = completion_step2.choices[0].message.content or ""
+    return _parse_json_result(associations_result)
+
+
+def matching_pair(text: str, prompt: str, client: OpenAI, model: str):
+    """
+    Classifies an extracted exposure/outcome pair against target concepts.
+    Returns the parsed JSON object directly.
+    """
+    completion = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system",
+             "content": "You are an expert in epidemiology, specialized in social determinants of health (SDoh), especially in effect of salt on cardiovascular events and mortality. "},
             {"role": "user", "content": prompt},
             {"role": "user", "content": text}
         ],
         temperature=0,
-        response_format={ "type": "json_object" }
+        response_format={"type": "json_object"}
     )
+    result = completion.choices[0].message.content or "{}"
+    return _parse_json_result(result)
 
-    result = completion.choices[0].message.content
-    try:
-        # Convert the response to a dictionary
-        result_dict = literal_eval(result)
-        return result_dict
-    except Exception as e:
-        # Return a dictionary with NA in case of error
-        print(result)
-        return {"exp_direction": "NA", "exposure_match": "NA", "outcome_match": "NA"}
-    #time.sleep(30)
 
-def worker_match(input_queue, output_queue, progress_bar,client,MODEL):
+# =======================
+# Multithreaded runners
+# =======================
+
+def _worker_extract(input_queue, output_queue, progress_bar, client, model):
+    """Worker function for two-step extraction."""
     while True:
-        index, row = input_queue.get()
-        if index is None:
+        item = input_queue.get()
+        if item is None:
             break
+        pmid, text = item
         try:
-            result = matching_pair(row['classify_input'], prompt_template_matching,client,MODEL)
-
-            output_queue.put((index, result))
+            extracted_results = two_step_extraction(text, client, model)
+            for res in extracted_results:
+                res['pmid'] = pmid
+                output_queue.put(res)
         except Exception as e:
-            print(f"Error processing row {index}: {e}")
+            print(f"Error processing PMID {pmid}: {e}", file=sys.stderr)
+            try:
+                preview = str(text)[:500]
+            except Exception:
+                preview = "N/A"
+            print(f"Input text: {preview}...", file=sys.stderr)
+            if 'extracted_results' in locals() and extracted_results is not None:
+                print(f"Failed output: {extracted_results}", file=sys.stderr)
         finally:
             input_queue.task_done()
             progress_bar.update(1)
 
-# Main function to process all rows in the DataFrame using multithreading
-def match_results(df,client,MODEL):
+
+def _worker_match(input_queue, output_queue, progress_bar, client, model, prompt_template_matching):
+    """Worker function for concept matching."""
+    while True:
+        item = input_queue.get()
+        if item is None:
+            break
+        index, row = item
+        try:
+            result = matching_pair(row['classify_input'], prompt_template_matching, client, model)
+            output_queue.put((index, result))
+        except Exception as e:
+            print(f"Error processing matching for row {index}: {e}", file=sys.stderr)
+        finally:
+            input_queue.task_done()
+            progress_bar.update(1)
+
+
+def process_file(file_path: str, client: OpenAI, model: str) -> Optional[pd.DataFrame]:
+    """
+    Reads data from an XLSX or CSV file and runs the extraction pipeline.
+    """
+    if not os.path.exists(file_path):
+        print(f"⚠️ Error: File not found at {file_path}", file=sys.stderr)
+        return None
+
+    file_extension = Path(file_path).suffix.lower()
+    df = None
+    if file_extension == '.csv':
+        df = pd.read_csv(file_path)
+    elif file_extension in ['.xlsx', '.xls']:
+        df = pd.read_excel(file_path)
+    else:
+        print(f"⚠️ Error: Unsupported file type '{file_extension}'. Only .csv and .xlsx are supported.",
+              file=sys.stderr)
+        return None
+
+    if df.empty:
+        print(f"⚠️ Warning: The file {file_path} is empty.", file=sys.stderr)
+        return None
+
+    return run_extraction(df, client, model)
+
+
+def run_extraction(all_got_df: pd.DataFrame,
+                   client: OpenAI,
+                   model: str,
+                   max_workers: int = 4) -> pd.DataFrame:
+    """
+    Orchestrates LLM extraction and matching to produce a structured DataFrame.
+    """
+    if all_got_df is None or all_got_df.empty:
+        raise ValueError("all_got_df is empty or None.")
+
+    df_in = all_got_df.copy()
+    for col in ['title', 'abstract']:
+        if col not in df_in.columns:
+            df_in[col] = ""
+    df_in['text'] = "Title: " + df_in['title'].fillna("") + "\n\nAbstract: " + df_in['abstract'].fillna("")
+
+    if 'pmid' not in df_in.columns:
+        # If no pmid, create a unique identifier for each row
+        df_in['pmid'] = range(len(df_in))
+
+    global total_input_tokens, total_output_tokens
+    total_input_tokens = 0
+    total_output_tokens = 0
+
+    results = []
     input_queue = Queue()
     output_queue = Queue()
 
-    # Progress bar for processing
-    progress_bar = tqdm(total=df.shape[0], desc="Processing rows", position=0, leave=True)
+    progress_bar = tqdm(total=df_in.shape[0], desc=f"Extracting with {model}", position=0, leave=True)
 
-    # Start worker threads
-    num_workers = 16
+    threads = []
+    for _ in range(max_workers):
+        t = threading.Thread(
+            target=_worker_extract,
+            args=(input_queue, output_queue, progress_bar, client, model),
+            daemon=True
+        )
+        t.start()
+        threads.append(t)
+
+    for _, row in df_in.iterrows():
+        input_queue.put((row['pmid'], row['text']))
+
+    input_queue.join()
+
+    for _ in threads:
+        input_queue.put(None)
+    for t in threads:
+        t.join()
+
+    progress_bar.close()
+
+    while not output_queue.empty():
+        results.append(output_queue.get())
+
+    print(f"Total input tokens for {model}: {total_input_tokens}")
+    print(f"Total output tokens for {model}: {total_output_tokens}")
+    print(f"Total tokens used (input + output) for {model}: {total_input_tokens + total_output_tokens}")
+
+    if not results:
+        print("No results extracted. Returning original DataFrame.")
+        return df_in[['pmid']].copy()
+
+    extracted_df = pd.json_normalize(results)
+
+    # Now perform the matching step
+    extracted_df['classify_input'] = extracted_df.apply(
+        lambda r: json.dumps({
+            "extracted_exposure": r.get('exposure', ''),
+            "extracted_outcome": r.get('outcome', '')
+        }),
+        axis=1
+    )
+
+    matched_df = match_results(extracted_df, client=client, model=model)
+
+    # Add pub_year from original DataFrame and ensure proper typing
+    year_df = df_in[['pmid', 'pub_year']].drop_duplicates() if 'pub_year' in df_in.columns else df_in[
+        ['pmid']].drop_duplicates()
+    final_df = matched_df.merge(year_df, on='pmid', how='left')
+    if 'pub_year' in final_df.columns:
+        final_df['pub_year'] = pd.to_numeric(final_df['pub_year'], errors='coerce')
+
+    return final_df
+
+
+def match_results(df: pd.DataFrame, client: OpenAI, model: str) -> pd.DataFrame:
+    """
+    Matches extracted exposures and outcomes against target concepts using threading.
+    """
+    input_queue = Queue()
+    output_queue = Queue()
+
+    progress_bar = tqdm(total=df.shape[0], desc=f"Matching with {model}", position=0, leave=True)
+
+    num_workers = 8
+    threads = []
+    # Create the prompt once outside the loop for efficiency
+    prompt_template_matching = """I extracted exposures and outcomes from abstracts of studies.
+I will send you extracted exposure and extracted outcome in a dictionary.
+
+please help me
+
+1. classify if the extracted exposure concept is 'salt/urinary sodium/sodium chloride/NaCI' or synonyms (must be same or highly associated concept)
+2. classify if the extracted outcome concept is 'cardiovascular events/diseases, cvd events/diseases, any kind of mortality or death' or synonyms (must be same or highly associated concept)
+
+note CVD events are major health incidents or outcomes that stem from cardiovascular disease (CVD)—that is, disease of the heart and blood vessels. Common examples include: •  Heart attack (myocardial infarction) • Stroke (cerebrovascular accident) •    Unstable angina •  Sudden cardiac death • Heart failure exacerbation •   Coronary revascularization procedures (e.g., bypass surgery, angioplasty)
+
+this is the input and output strucuture:
+input: {{extracted_exposure: ''; extracted_outcome: ''}}
+output: {{exposure_match: 'yes'/'no', outcome_match: 'yes'/'no'}}
+
+below are examples
+example 1:
+input: {{extracted_exposure: 'high salt intake'; extracted_outcome: 'blood pressure'}}
+output: {{exposure_match: 'yes', outcome_match: 'no'}}
+
+example 2:
+input: {{extracted_exposure: 'reduced dietary salt'; extracted_outcome: 'diastolic blood pressure'}}
+output: {{exposure_match: 'yes', outcome_match: 'no'}}
+
+example 3:
+input: {{extracted_exposure: 'exercise'; extracted_outcome: 'myocardial infarction'}}
+output: {{exposure_match: 'no', outcome_match: 'yes'}}
+
+example 4:
+input: {{extracted_exposure: 'mobile app intervention'; extracted_outcome: 'stroke'}}
+output: {{exposure_match: 'no', outcome_match: 'yes'}}
+
+example 5:
+input: {{extracted_exposure: 'mobile app intervention'; extracted_outcome: 'all cause mortality'}}
+output: {{exposure_match: 'no', outcome_match: 'yes'}}
+
+only return the output json, do not output other descriptive words"""
+
     for _ in range(num_workers):
-        threading.Thread(target=worker_match, args=(input_queue, output_queue, progress_bar,client,MODEL), daemon=True).start()
+        t = threading.Thread(
+            target=_worker_match,
+            args=(input_queue, output_queue, progress_bar, client, model, prompt_template_matching),
+            daemon=True
+        )
+        t.start()
+        threads.append(t)
 
-    # Enqueue rows for processing
     for index, row in df.iterrows():
         input_queue.put((index, row))
 
-    # Wait for all tasks to be processed
     input_queue.join()
 
-    # Collect results from output queue
-    results = []
-    while not output_queue.empty():
-        index, result = output_queue.get()
-        # Ensure each result retains the correct index
-        #df.at[index, 'exp_direction'] = result['exp_direction']
-        df.at[index, 'exposure_match'] = result['exposure_match']
-        df.at[index, 'outcome_match'] = result['outcome_match']
+    for _ in threads:
+        input_queue.put(None)
+    for t in threads:
+        t.join()
 
-    # Close progress bar
     progress_bar.close()
 
+    while not output_queue.empty():
+        index, result = output_queue.get()
+        df.loc[index, 'exposure_match'] = result.get('exposure_match', 'NA')
+        df.loc[index, 'outcome_match'] = result.get('outcome_match', 'NA')
+
     return df
+
+
+# Deprecated - use run_extraction instead
+def compile_extracted_results(input_df: pd.DataFrame, text_column: str, client: OpenAI, model: str) -> pd.DataFrame:
+    """
+    DEPRECATED. Please use the `run_extraction` function instead.
+    """
+    print(
+        "WARNING: `compile_extracted_results` is deprecated. Use `run_extraction` for a more robust and complete pipeline.")
+    return run_extraction(input_df.rename(columns={text_column: 'text', 'pmid': 'pmid'}), client, model)

@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Triangulation Analysis & LLM Performance</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f3f4f6;
+            transition: opacity 1s ease-in-out;
+        }
+    </style>
+</head>
+<body class="p-6 md:p-10 flex flex-col items-center min-h-screen">
+    <div id="loading" class="text-xl font-semibold text-gray-700">Analyzing data... please wait</div>
+
+    <div id="content" class="w-full max-w-5xl space-y-12 hidden opacity-0 transition-opacity duration-1000">
+        <h1 class="text-3xl md:text-4xl font-bold text-gray-800 text-center mb-8">Triangulation & LLM Performance Analysis</h1>
+
+        <!-- Triangulation Analysis Section -->
+        <div class="bg-white p-6 md:p-8 rounded-lg shadow-xl border border-gray-200">
+            <h2 class="text-2xl font-bold text-gray-800 mb-6 border-b pb-4">Triangulation Analysis: Salt Intake & Blood Pressure</h2>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                <div>
+                    <canvas id="triangulationChart"></canvas>
+                </div>
+                <div>
+                    <h3 class="text-xl font-semibold text-gray-700 mb-4">Summary of Findings</h3>
+                    <p class="text-gray-600 mb-4">
+                        The analysis triangulates evidence from various study designs to evaluate the relationship between salt intake and blood pressure.
+                        The chart below summarizes the findings, showing the proportion of studies with a **supportive** relationship (salt reduction leads to lower blood pressure), a **non-supportive** or **no-change** relationship, and those with an **excitatory** relationship (salt intake increases blood pressure).
+                    </p>
+                    <div class="p-4 bg-gray-100 rounded-lg border border-gray-300">
+                        <ul class="text-sm font-medium text-gray-700 space-y-2">
+                            <li class="flex items-center space-x-2"><span class="w-3 h-3 rounded-full bg-blue-500"></span><span class="font-bold">Supportive:</span> Studies where a decrease in salt intake is associated with a decrease in blood pressure.</li>
+                            <li class="flex items-center space-x-2"><span class="w-3 h-3 rounded-full bg-orange-500"></span><span class="font-bold">Excitatory:</span> Studies where an increase in salt intake is associated with an increase in blood pressure.</li>
+                            <li class="flex items-center space-x-2"><span class="w-3 h-3 rounded-full bg-gray-500"></span><span class="font-bold">No Change:</span> Studies where no significant association was found.</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- LLM Performance Section -->
+        <div class="bg-white p-6 md:p-8 rounded-lg shadow-xl border border-gray-200">
+            <h2 class="text-2xl font-bold text-gray-800 mb-6 border-b pb-4">LLM Performance Metrics</h2>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                <div>
+                    <h3 class="text-xl font-semibold text-gray-700 mb-4">Model Performance Summary</h3>
+                    <p class="text-gray-600 mb-4">
+                        This chart compares the performance of different Large Language Models (LLMs) on the task of extracting exposures and outcomes from text. The performance is measured using the F1 score, which balances precision and recall, and is weighed against the average cost per query.
+                    </p>
+                    <div class="p-4 bg-gray-100 rounded-lg border border-gray-300">
+                        <ul class="text-sm font-medium text-gray-700 space-y-2">
+                            <li class="flex items-center space-x-2"><span class="w-3 h-3 rounded-full bg-green-500"></span><span class="font-bold">F1 Score:</span> A measure of the model's accuracy, with a value closer to 1 being better.</li>
+                            <li class="flex items-center space-x-2"><span class="w-3 h-3 rounded-full bg-red-500"></span><span class="font-bold">Cost ($):</span> The average cost to process one record with the model.</li>
+                        </ul>
+                    </div>
+                </div>
+                <div>
+                    <canvas id="llmPerformanceChart"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const loadingElement = document.getElementById('loading');
+            const contentElement = document.getElementById('content');
+
+            // Simulate a processing delay of 3 seconds
+            setTimeout(() => {
+                loadingElement.classList.add('hidden');
+                contentElement.classList.remove('hidden');
+                contentElement.classList.remove('opacity-0');
+                
+                // Triangulation Analysis Data (Simplified and hardcoded for demonstration)
+                const triangulationData = {
+                    labels: ['Supportive', 'Excitatory', 'No Change'],
+                    datasets: [{
+                        label: 'Study Direction',
+                        data: [75, 15, 10], // Percentages based on simulated data
+                        backgroundColor: [
+                            'rgba(59, 130, 246, 0.8)', // Tailwind blue-500
+                            'rgba(249, 115, 22, 0.8)', // Tailwind orange-500
+                            'rgba(107, 114, 128, 0.8)'  // Tailwind gray-500
+                        ],
+                        borderColor: [
+                            'rgba(59, 130, 246, 1)',
+                            'rgba(249, 115, 22, 1)',
+                            'rgba(107, 114, 128, 1)'
+                        ],
+                        borderWidth: 1
+                    }]
+                };
+
+                const triangulationConfig = {
+                    type: 'pie',
+                    data: triangulationData,
+                    options: {
+                        responsive: true,
+                        plugins: {
+                            legend: {
+                                position: 'top',
+                            },
+                            title: {
+                                display: true,
+                                text: 'Relationship between Salt Intake and Blood Pressure',
+                                font: {
+                                    size: 16
+                                }
+                            }
+                        }
+                    }
+                };
+
+                // LLM Performance Data (from model_performance_cer.xlsx)
+                const llmPerformanceData = {
+                    labels: ['deepseek-chat', 'glm-4-airx', 'qwen-plus', 'GPT-4o-mini'],
+                    datasets: [
+                        {
+                            label: 'Mean F1 Score',
+                            data: [0.80, 0.82, 0.77, 0.75],
+                            backgroundColor: 'rgba(34, 197, 94, 0.8)', // Tailwind green-500
+                            borderColor: 'rgba(34, 197, 94, 1)',
+                            borderWidth: 1,
+                            yAxisID: 'y1',
+                        },
+                        {
+                            label: 'Mean Cost ($)',
+                            data: [0.42, 2.82, 2.25, 1.20],
+                            backgroundColor: 'rgba(239, 68, 68, 0.8)', // Tailwind red-500
+                            borderColor: 'rgba(239, 68, 68, 1)',
+                            borderWidth: 1,
+                            yAxisID: 'y2',
+                        }
+                    ]
+                };
+
+                const llmPerformanceConfig = {
+                    type: 'bar',
+                    data: llmPerformanceData,
+                    options: {
+                        responsive: true,
+                        plugins: {
+                            legend: {
+                                position: 'top',
+                            },
+                            title: {
+                                display: true,
+                                text: 'LLM Performance: F1 Score vs. Cost',
+                                font: {
+                                    size: 16
+                                }
+                            }
+                        },
+                        scales: {
+                            y1: {
+                                type: 'linear',
+                                display: true,
+                                position: 'left',
+                                title: {
+                                    display: true,
+                                    text: 'F1 Score'
+                                },
+                                beginAtZero: true,
+                                max: 1.0,
+                                ticks: {
+                                    stepSize: 0.1
+                                }
+                            },
+                            y2: {
+                                type: 'linear',
+                                display: true,
+                                position: 'right',
+                                title: {
+                                    display: true,
+                                    text: 'Mean Cost ($)'
+                                },
+                                grid: {
+                                    drawOnChartArea: false,
+                                },
+                                beginAtZero: true
+                            }
+                        }
+                    }
+                };
+                
+                new Chart(document.getElementById('triangulationChart'), triangulationConfig);
+                new Chart(document.getElementById('llmPerformanceChart'), llmPerformanceConfig);
+
+            }, 3000); // 3-second delay
+        });
+    </script>
+</body>
+</html>

@@ -33,34 +33,47 @@ def fetch_pubmed(pmid_list: List[str], chunk_size: int = 50) -> pd.DataFrame:
     return crawler(pmid_chunks)
 
 
-#https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&id=16570560
-def crawler(pmid_chunks):
+def crawler(pmid_chunks: List[List[str]]) -> pd.DataFrame:
+    """
+    Crawls PubMed to fetch article metadata in chunks.
 
-    retmode = "xml"
+    Parameters
+    ----------
+    pmid_chunks : list[list[str]]
+        A list of lists, where each inner list is a chunk of PMIDs.
 
-    rettype = ""
-
+    Returns
+    -------
+    pandas.DataFrame
+        A DataFrame with all the parsed PubMed data.
+    """
     full_df_list = []
     count = 0
+    retmode = "xml"
+    rettype = ""
+
     for chunk in pmid_chunks:
+        print(f'chunk #{count} starts at: {datetime.datetime.now()}')
 
-        print(f'chunk #{count} starts at:',datetime.datetime.now())
+        chunk_str = ",".join(chunk)
 
-        chunk_str = str(chunk).replace("'",'').replace('[','').replace(']','').replace(' ','')
-        resp = requests.get(
-            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
-            params={
-                "db": "pubmed",
-                "retmode": retmode,
-                "id": chunk_str,
-                "rettype": rettype,
-            },
-            timeout=30,
-        )
-        if not resp.ok:
-            print(f"Request failed for chunk #{count} (status {resp.status_code}) – skipping")
+        try:
+            resp = requests.get(
+                "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
+                params={
+                    "db": "pubmed",
+                    "retmode": retmode,
+                    "id": chunk_str,
+                    "rettype": rettype,
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()  # Raises an HTTPError for bad responses (4xx or 5xx)
+
+        except requests.exceptions.RequestException as e:
+            print(f"Request failed for chunk #{count}: {e} – skipping")
             count += 1
-            time.sleep(1)
+            time.sleep(5)
             continue
 
         try:
@@ -68,199 +81,125 @@ def crawler(pmid_chunks):
         except ET.ParseError as e:
             print(f"XML parse error for chunk #{count}: {e} – skipping")
             count += 1
-            time.sleep(1)
+            time.sleep(5)
             continue
 
-        ## getting data from each pmid chunk
-
-        full_dict = {}
+        chunk_data = {}
         for article in root.findall('PubmedArticle/MedlineCitation'):
-            pmid = article[0].text
+            pmid = article.find('PMID').text
             info_dict = {}
 
-        #############################################################  article info
-            article_tree = article.findall('Article')
+            # --- Article Info ---
+            article_tree = article.find('Article')
+            if article_tree is not None:
+                # Publication Date
+                pub_date = article_tree.find('.//PubDate')
+                year = pub_date.find('Year').text if pub_date is not None and pub_date.find(
+                    'Year') is not None else None
+                month = pub_date.find('Month').text if pub_date is not None and pub_date.find(
+                    'Month') is not None else None
 
-            for art_info in article_tree:
-
-                if art_info.find('.//PubDate'):
-                    pub_date = art_info.find('.//PubDate')
-                    year_element = pub_date.find('Year')
-                    month_element = pub_date.find('Month')
-                    year = year_element.text if year_element is not None else None
-                    month = month_element.text if month_element is not None else None
-                else:
-                    year = None
-                    month = None
-
-                info_dict['pub_year'] = year
-                info_dict['pub_month'] = month
-
-                if art_info.find('.//ArticleDate[@DateType="Electronic"]'):
-                    epub_date = art_info.find('.//ArticleDate[@DateType="Electronic"]')
-                    epub_year_element = epub_date.find('Year')
-                    epub_month_element = epub_date.find('Month')
-                    epub_year = epub_year_element.text if epub_year_element is not None else None
-                    epub_month = epub_month_element.text if epub_month_element is not None else None
-                else:
-                    epub_year = None
-                    epub_month = None
-
-                publication_types = [pub_type.text for pub_type in art_info.findall('.//PublicationType')]
+                # Electronic Publication Date
+                epub_date = article_tree.find('.//ArticleDate[@DateType="Electronic"]')
+                epub_year = epub_date.find('Year').text if epub_date is not None and epub_date.find(
+                    'Year') is not None else None
+                epub_month = epub_date.find('Month').text if epub_date is not None and epub_date.find(
+                    'Month') is not None else None
 
                 info_dict['pub_year'] = year
                 info_dict['pub_month'] = month
                 info_dict['epub_year'] = epub_year
                 info_dict['epub_month'] = epub_month
+
+                # Publication Types
+                publication_types = [pub_type.text for pub_type in article_tree.findall('.//PublicationType')]
                 info_dict['pub_types'] = publication_types
 
-                background = None
-                conclusion = None
-                result = None
-                method = None
-                label_conclusion = None
-                label_result = None
+                # Article Title
+                article_title = article_tree.find('.//ArticleTitle').text if article_tree.find(
+                    './/ArticleTitle') is not None else None
+                info_dict['article_title'] = article_title
 
-                article_title = art_info.find('.//ArticleTitle').text
-
-                p_type = art_info.findall('Abstract/')
-
-                a = [i  for i in p_type if (i.tag == 'AbstractText')]
-
-                full_abs = [i.text for i in a]
-                full_abs = ''.join([i.text for i in a if i.text is not None])
+                # Abstract
+                abstract_text_elements = article_tree.findall('.//AbstractText')
+                full_abs = "".join([i.text for i in abstract_text_elements if i.text is not None])
                 info_dict['full_abs'] = full_abs
 
-                for i in a:
+                background, conclusion, result, method, label_conclusion, label_result = None, None, None, None, None, None
+                for abs_part in abstract_text_elements:
+                    if 'NlmCategory' in abs_part.attrib:
+                        category = abs_part.attrib['NlmCategory']
+                        text = abs_part.text
+                        if category == 'BACKGROUND':
+                            background = text
+                        elif category == 'CONCLUSIONS':
+                            conclusion = text
+                        elif category == 'RESULTS':
+                            result = text
+                        elif category == 'METHODS':
+                            method = text
 
-                  ##getting method
-                  if 'NlmCategory' in i.attrib.keys():
-                      if i.attrib['NlmCategory'] == 'BACKGROUND':
-                          background = i.text
-                      else:
-                          pass
-                  else:
-                      background = None
-                  ##gettomg conclusion
-                  if 'NlmCategory' in i.attrib.keys():
-                      if i.attrib['NlmCategory'] == 'CONCLUSIONS':
-                          conclusion = i.text
-                      else:
-                          pass
-                  else:
-                      conclusion = None
+                    if 'Label' in abs_part.attrib:
+                        label = abs_part.attrib['Label'].lower()
+                        text = abs_part.text
+                        if 'conclusion' in label:
+                            label_conclusion = text
+                        elif 'result' in label:
+                            label_result = text
 
-                  if 'NlmCategory' in i.attrib.keys():
-                      if i.attrib['NlmCategory'] == 'RESULTS':
-                          result = i.text
-                      else:
-                          pass
-                  else:
-                      result = None
-
-                  if 'NlmCategory' in i.attrib.keys():
-                      if i.attrib['NlmCategory'] == 'METHODS':
-                          method = i.text
-                      else:
-                          pass
-                  else:
-                      method = None
-
-                  if 'Label' in i.attrib.keys():
-                      if 'conclusion' in i.attrib['Label'].lower():
-                          label_conclusion = i.text
-                      else:
-                          pass
-                  else:
-                      label_conclusion = None
-
-                  if 'Label' in i.attrib.keys():
-                      if 'result' in i.attrib['Label'].lower():
-                          label_result = i.text
-                      else:
-                          pass
-                  else:
-                      label_result = None
-
-                info_dict['article_title'] = article_title
                 info_dict['background'] = background
                 info_dict['method'] = method
                 info_dict['result'] = result
                 info_dict['conclusion'] = conclusion
                 info_dict['label_result'] = label_result
                 info_dict['label_conclusion'] = label_conclusion
-        #################################################### commentaries info
-            comment_tree = article.findall('CommentsCorrectionsList')
-            for comment_info in comment_tree:
-                comment_count = 0
-                for i in comment_info:
-                    if i.attrib['RefType'] == 'CommentIn':
-                        comment_count+=1
-                info_dict['# of comments'] = comment_count
-        #################################################### mesh info
-            mesh_tree = article.findall('MeshHeadingList')
-            for mesh_info in mesh_tree:
 
-                all_mesh_list = []
-                major_mesh_list = []
-                for i in mesh_info:
+            # --- Commentaries Info ---
+            comment_tree = article.find('CommentsCorrectionsList')
+            comment_count = sum(
+                1 for i in comment_tree if i.attrib.get('RefType') == 'CommentIn') if comment_tree is not None else 0
+            info_dict['# of comments'] = comment_count
 
-                    full_mesh = ''
-                    major_mesh = ''
+            # --- Mesh Info ---
+            mesh_tree = article.find('MeshHeadingList')
+            all_mesh_list = []
+            major_mesh_list = []
+            if mesh_tree is not None:
+                for mesh_heading in mesh_tree.findall('MeshHeading'):
+                    full_mesh_parts = []
+                    major_mesh_parts = []
 
-                    if_major = 0
+                    descriptor = mesh_heading.find('DescriptorName')
+                    if descriptor is not None:
+                        full_mesh_parts.append(descriptor.text)
+                        if descriptor.attrib.get('MajorTopicYN') == 'Y':
+                            major_mesh_parts.append(descriptor.text + '*')
 
-                    for m in i:
+                    for qualifier in mesh_heading.findall('QualifierName'):
+                        full_mesh_parts.append(qualifier.text)
+                        if qualifier.attrib.get('MajorTopicYN') == 'Y':
+                            major_mesh_parts.append(qualifier.text + '*')
 
-                        if m.tag=='DescriptorName':
-                            descriptor=m.text
-                            qualifier = ''
-                            full_mesh+=descriptor
-                            full_mesh += ''
-                            full_mesh+=qualifier
+                    all_mesh_list.append("/".join(full_mesh_parts))
+                    if major_mesh_parts:
+                        major_mesh_list.append("/".join(major_mesh_parts))
 
-                            major_mesh+=descriptor
+            info_dict['all_mesh_terms'] = all_mesh_list
+            info_dict['major_mesh_terms'] = major_mesh_list
 
-                            major_mesh += ''
-                            if m.attrib['MajorTopicYN'] == 'Y':
-                                major_mesh +='*'
-                            major_mesh+=qualifier
+            chunk_data[pmid] = info_dict
 
-                        elif m.tag=='QualifierName':
-                            descriptor=''
-                            qualifier = m.text
+        if chunk_data:
+            info_df = pd.DataFrame.from_dict(chunk_data, orient='index').reset_index().rename(columns={'index': 'pmid'})
+            full_df_list.append(info_df)
 
-                            full_mesh+=descriptor
-                            full_mesh += '/'
-                            full_mesh+=qualifier
-
-                            if m.attrib['MajorTopicYN'] == 'Y':
-
-                                major_mesh+=descriptor
-                                major_mesh += '/'
-                                major_mesh+=qualifier
-                                major_mesh+='*'
-
-                    all_mesh_list.append(full_mesh)
-                    major_mesh_list.append(major_mesh)
-                    major_mesh_list = [value for value in major_mesh_list if '*' in value]
-
-
-                info_dict['all_mesh_terms'] = all_mesh_list
-                info_dict['major_mesh_terms'] = major_mesh_list
-        ##############################################################
-            full_dict[pmid] = info_dict
-            info_df = pd.DataFrame(full_dict).transpose().reset_index()
-
-        info_df = pd.DataFrame(full_dict).transpose().reset_index()
-        full_df_list.append(info_df)
-        print(f'chunk #{count} is done at:',datetime.datetime.now())
-        count+=1
+        print(f'chunk #{count} is done at: {datetime.datetime.now()}')
+        count += 1
         print('\n')
         time.sleep(5)
 
     if not full_df_list:
         return pd.DataFrame()
 
-    final_df = pd.concat(full_df_list)
+    final_df = pd.concat(full_df_list, ignore_index=True)
     return final_df
