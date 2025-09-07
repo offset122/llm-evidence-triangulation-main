@@ -1,5 +1,7 @@
 import pandas as pd
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 import os
@@ -142,8 +144,8 @@ def plot_cumulative_trends(results_df, title, focus_year=None, show_legend=True)
         plt.legend(handles=[patch1, patch2], loc='best', fontsize=base_fontsize)
 
     fig.tight_layout()
-    plt.savefig('cumulative_trends_plot.png')
-    plt.show()
+    plt.savefig('cumulative_trends_plot.png', bbox_inches='tight')
+    plt.close(fig)
 
 
 if __name__ == "__main__":

@@ -12,7 +12,6 @@ import os
 import sys
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 from dotenv import load_dotenv
 from pathlib import Path
 
@@ -20,12 +19,18 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).parent / "notebooks"))
 
 try:
-    from extraction_matching import run_extraction, process_file
-    from triangulation import analyze_tri_df, plot_cumulative_trends
-    from pubmed_fetcher_function import fetch_pubmed
+    from notebooks.extraction_matching import run_extraction, process_file
+    from notebooks.triangulation import analyze_tri_df, plot_cumulative_trends
+    from notebooks.pubmed_fetcher_function import fetch_pubmed
 except ImportError as e:
     print(f"Warning: Could not import modules: {e}")
     print("Some features may not be available.")
+    # Define fallback functions to prevent NameError
+    def analyze_tri_df(*args, **kwargs):
+        print("ERROR: analyze_tri_df function not available")
+        return None
+    def plot_cumulative_trends(*args, **kwargs):
+        print("ERROR: plot_cumulative_trends function not available")
 
 # Load environment variables from the .env file
 load_dotenv()

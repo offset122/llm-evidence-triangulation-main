@@ -1,5 +1,6 @@
 import datetime
 import time
+import os
 import requests
 import pandas as pd
 import xml.etree.ElementTree as ET
@@ -52,20 +53,31 @@ def crawler(pmid_chunks: List[List[str]]) -> pd.DataFrame:
     retmode = "xml"
     rettype = ""
 
+    # Optional NCBI identification
+    ncbi_params = {}
+    ncbi_email = os.getenv("NCBI_EMAIL")
+    if ncbi_email:
+        ncbi_params["email"] = ncbi_email
+    ncbi_api_key = os.getenv("NCBI_API_KEY")
+    if ncbi_api_key:
+        ncbi_params["api_key"] = ncbi_api_key
+
     for chunk in pmid_chunks:
         print(f'chunk #{count} starts at: {datetime.datetime.now()}')
 
         chunk_str = ",".join(chunk)
 
         try:
-            resp = requests.get(
-                "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
-                params={
+            params = {
                     "db": "pubmed",
                     "retmode": retmode,
                     "id": chunk_str,
                     "rettype": rettype,
-                },
+                }
+            params.update(ncbi_params)
+            resp = requests.get(
+                "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
+                params=params,
                 timeout=30,
             )
             resp.raise_for_status()  # Raises an HTTPError for bad responses (4xx or 5xx)
